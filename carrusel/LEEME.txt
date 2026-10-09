@@ -1,0 +1,4 @@
+Pon aquí las fotos del carrusel (jpg, jpeg, png o webp).
+Opción A: nómbralas 1.jpg, 2.jpg, 3.jpg... (sin saltos de número).
+Opción B: lista los nombres, en orden, en fotos.json. Ejemplo: ["playa.jpg", "cena.png"]
+Recomendado: fotos de máximo ~1200 px de ancho para que carguen rápido.
