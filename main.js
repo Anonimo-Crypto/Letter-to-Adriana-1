@@ -12,7 +12,7 @@
 
   const QUESTIONS = [
     { q: '¿Cuál es mi color favorito?', correct: 0, o: ['Negro', 'Blanco', 'Gris', 'Todos los anteriores'] },
-    { q: '¿Cuál es mi serie favorita?', correct: 0, o: ['Tensei Shitara Slime Datta Ken', 'Black Clover', 'Shingeki no Kyojin', 'Todas las anteriores'] },
+    { q: '¿Cuál es mi serie anime favorita?', correct: 0, o: ['Tensei Shitara Slime Datta Ken', 'Black Clover', 'Shingeki no Kyojin', 'Todas las anteriores'] },
     { q: '¿Cuál es mi sabor favorito?', correct: 1, o: ['Fresa', 'Chocolate', 'Vainilla'] },
     { q: '¿Qué soy tuyo?', correct: 'any', o: ['Tu novio', 'Tu Pocho', 'Tu propiedad', { t: 'Aún no lo sé', wrong: true }, { t: 'TUYO Y SOLO TUYO', secret: true }] },
     { q: '¿Me quieres?', correct: null, count: false, o: ['Sí', 'Sí', 'Sí'] },
