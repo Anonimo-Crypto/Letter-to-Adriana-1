@@ -12,7 +12,7 @@
 
   const QUESTIONS = [
     { q: '¿Cuál es mi color favorito?', correct: 0, o: ['Negro', 'Blanco', 'Gris', 'Todos los anteriores'] },
-    { q: '¿Cuál es mi serie anime favorita?', correct: 0, o: ['Tensei Shitara Slime Datta Ken', 'Black Clover', 'Shingeki no Kyojin', 'Todas las anteriores'] },
+    { q: '¿Cuál es mi serie favorita?', correct: 0, o: ['Tensei Shitara Slime Datta Ken', 'Black Clover', 'Shingeki no Kyojin', 'Todas las anteriores'] },
     { q: '¿Cuál es mi sabor favorito?', correct: 1, o: ['Fresa', 'Chocolate', 'Vainilla'] },
     { q: '¿Qué soy tuyo?', correct: 'any', o: ['Tu novio', 'Tu Pocho', 'Tu propiedad', { t: 'Aún no lo sé', wrong: true }, { t: 'TUYO Y SOLO TUYO', secret: true }] },
     { q: '¿Me quieres?', correct: null, count: false, o: ['Sí', 'Sí', 'Sí'] },
@@ -450,25 +450,35 @@
     try { return !!(await caches.match(u, { ignoreSearch: true, ignoreVary: true })); } catch (_) { return false; }
   };
 
-  // Descarga un archivo, lo guarda en Cache Storage y reporta el progreso en bytes
-  async function grab(url, onProg) {
-    const cache = await caches.open(MEDIA);
-    const res = await fetch(url, { cache: 'reload' });
+  const fmtSize = (b) => (b >= 1048576 ? (b / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(b / 1024)) + ' KB');
+  const fmtSpeed = (bps) => (bps >= 1048576 ? (bps / 1048576).toFixed(1) + ' MB/s' : Math.round(bps / 1024) + ' KB/s');
+  const baseName = (u) => { try { return decodeURIComponent(new URL(u).pathname.split('/').pop()) || u; } catch (_) { return u; } };
+
+  // Descarga a memoria (la pausa frena de verdad la red) y guarda en Cache Storage
+  async function grab(url, { signal, onProg, hold }) {
+    const res = await fetch(url, { cache: 'reload', signal });
     if (!res.ok || !res.body) throw new Error('http ' + res.status);
     const total = +res.headers.get('content-length') || 0;
-    const put = cache.put(url, res.clone());
     const rd = res.body.getReader();
+    const chunks = [];
     let got = 0;
     for (;;) {
+      await hold();
       const { done, value } = await rd.read();
       if (done) break;
+      chunks.push(value);
       got += value.length;
       onProg(got, total);
     }
-    await put;
+    const cache = await caches.open(MEDIA);
+    await cache.put(url, new Response(new Blob(chunks), {
+      status: 200,
+      headers: { 'content-type': res.headers.get('content-type') || 'application/octet-stream' },
+    }));
+    return got;
   }
 
-  // Solo aparece si falta algún archivo en el almacenamiento local
+  // Pantalla de descarga: solo aparece si falta algún archivo en el almacenamiento local
   async function ensureOffline() {
     if (!('caches' in window) || location.protocol === 'file:') return;
     const todo = [];
@@ -482,40 +492,125 @@
     const total = todo.length;
     const s = screen();
     s.innerHTML =
-      '<div class="dl-box"><p class="dl-title">Preparando todo</p>' +
-      '<p class="dl-sub">Esto solo pasa una vez. Después funciona sin conexión.</p>' +
+      '<div class="dl-box"><p class="dl-title"></p><p class="dl-sub"></p>' +
       '<p class="dl-pct">0%</p><div class="dl-bar"><i></i></div>' +
-      '<p class="dl-stat"></p><p class="dl-mb"></p></div>';
+      '<div class="dl-grid">' +
+      '<div><b class="v-speed">—</b><span>velocidad</span></div>' +
+      '<div><b class="v-data">0.0 MB</b><span>datos usados</span></div>' +
+      '<div><b class="v-files">0 / ' + total + '</b><span>archivos</span></div></div>' +
+      '<ul class="dl-list"></ul><div class="dl-actions"></div></div>';
     const $ = (c) => s.querySelector('.' + c);
-    const frac = new Map();
+
+    const size = new Map();
     const got = new Map();
-    todo.forEach((u) => { frac.set(u, 0); got.set(u, 0); });
+    const done = new Set();
+    const rows = new Map();
+    const waiters = [];
+    const samples = [];
+    const ac = new AbortController();
+    let paused = false, cancelled = false, state = 'idle', pending = todo;
+    let finish;
+    const finished = new Promise((r) => { finish = r; });
+
+    const list = $('dl-list');
+    todo.forEach((u) => {
+      got.set(u, 0);
+      const li = el('li', '', list);
+      li.dataset.s = 'wait';
+      li.innerHTML = '<i class="st">○</i><span class="nm"></span><em class="sz">—</em>';
+      li.querySelector('.nm').textContent = baseName(u);
+      rows.set(u, li);
+    });
+    const mark = (u, st, txt) => {
+      const li = rows.get(u);
+      li.dataset.s = st;
+      li.querySelector('.st').textContent = { wait: '○', run: '◐', ok: '✓', err: '✕' }[st];
+      li.querySelector('.sz').textContent = txt;
+      if (st === 'run') list.scrollTop = li.offsetTop - list.clientHeight / 2;
+    };
+    const prog = (u, txt) => { rows.get(u).querySelector('.sz').textContent = txt; };
 
     const paint = () => {
-      let f = 0, b = 0, d = 0;
-      frac.forEach((v) => { f += v; if (v >= 1) d++; });
-      got.forEach((v) => { b += v; });
-      const p = Math.min(1, f / total);
+      let b = 0, t = 0, f = 0, known = true;
+      todo.forEach((u) => {
+        const g = got.get(u), z = size.get(u);
+        b += g;
+        if (z) t += z; else known = false;
+        f += done.has(u) ? 1 : z ? Math.min(0.99, g / z) : 0;
+      });
+      const p = known && t ? Math.min(1, b / t) : f / total;
       $('dl-pct').textContent = Math.round(p * 100) + '%';
       $('dl-bar').firstElementChild.style.transform = `scaleX(${p})`;
-      $('dl-stat').textContent = `${d} / ${total} archivos`;
-      $('dl-mb').textContent = (b / 1048576).toFixed(1) + ' MB descargados';
+      $('v-data').textContent = (b / 1048576).toFixed(1) + (known ? ' / ' + (t / 1048576).toFixed(1) : '') + ' MB';
+      $('v-files').textContent = done.size + ' / ' + total;
     };
 
-    const runBatch = async (list) => {
+    // pausa: los workers esperan aquí
+    const hold = () => (paused ? new Promise((r) => waiters.push(r)) : null);
+    const wake = () => waiters.splice(0).forEach((f) => f());
+
+    // tamaños (HEAD) para el total y la barra exacta
+    (async () => {
+      let i = 0;
+      const w = async () => {
+        while (i < todo.length && !cancelled) {
+          const u = todo[i++];
+          try {
+            const r = await fetch(u, { method: 'HEAD', cache: 'no-store', signal: ac.signal });
+            const n = +r.headers.get('content-length');
+            if (n) { size.set(u, n); if (rows.get(u).dataset.s === 'wait') prog(u, fmtSize(n)); }
+          } catch (_) {}
+          paint();
+        }
+      };
+      await Promise.all([w(), w(), w(), w()]);
+    })();
+
+    const tick = setInterval(() => {
+      const now = performance.now();
+      let b = 0;
+      got.forEach((v) => { b += v; });
+      samples.push([now, b]);
+      while (samples.length > 1 && now - samples[0][0] > 3000) samples.shift();
+      const sp = $('v-speed');
+      if (state === 'pause') { sp.textContent = 'en pausa'; return; }
+      if (state !== 'run') { sp.textContent = '—'; return; }
+      const dt = (now - samples[0][0]) / 1000;
+      sp.textContent = dt > 0.4 ? fmtSpeed(Math.max(0, b - samples[0][1]) / dt) : '…';
+    }, 500);
+
+    const runBatch = async (batch) => {
       const failed = [];
       let next = 0;
       const worker = async () => {
-        while (next < list.length) {
-          const u = list[next++];
+        while (next < batch.length && !cancelled) {
+          await hold();
+          if (cancelled) return;
+          const u = batch[next++];
+          mark(u, 'run', '0%');
           let ok = false;
-          for (let t = 0; t < 3 && !ok; t++) {
+          for (let t = 0; t < 3 && !ok && !cancelled; t++) {
             try {
-              await grab(u, (g, tot) => { got.set(u, g); frac.set(u, tot ? Math.min(0.99, g / tot) : 0); paint(); });
+              const n = await grab(u, {
+                signal: ac.signal,
+                hold,
+                onProg: (g, tot) => {
+                  got.set(u, g);
+                  if (tot) size.set(u, tot);
+                  prog(u, tot ? Math.min(99, Math.round((g / tot) * 100)) + '%' : fmtSize(g));
+                  paint();
+                },
+              });
+              got.set(u, n); size.set(u, n);
               ok = true;
-            } catch (_) { await sleep(600 * (t + 1)); }
+            } catch (_) {
+              if (cancelled) return;
+              got.set(u, 0);
+              await sleep(600 * (t + 1));
+            }
           }
-          if (ok) { frac.set(u, 1); buzz(8); } else { frac.set(u, 0); got.set(u, 0); failed.push(u); }
+          if (ok) { done.add(u); mark(u, 'ok', fmtSize(got.get(u))); buzz(8); }
+          else { got.set(u, 0); failed.push(u); mark(u, 'err', 'error'); }
           paint();
         }
       };
@@ -523,33 +618,55 @@
       return failed;
     };
 
-    paint();
-    let pending = todo;
-    let skipped = false;
-    for (;;) {
-      const failed = await runBatch(pending);
-      if (!failed.length) break;
-      $('dl-sub').textContent = `No se pudieron descargar ${failed.length} archivos. Revisa tu conexión.`;
-      const acts = el('div', 'dl-actions', $('dl-box'));
-      const choice = await new Promise((res) => {
-        [['Reintentar', 'retry'], ['Continuar', 'skip']].forEach(([label, v]) => {
-          const b = el('button', 'opt', acts);
-          b.type = 'button';
-          b.textContent = label;
-          reveal(b);
-          b.addEventListener('click', () => { buzz(25); res(v); }, { once: true });
-        });
-      });
-      acts.remove();
-      if (choice === 'skip') { skipped = true; break; }
-      $('dl-sub').textContent = 'Reintentando…';
-      pending = failed;
-    }
+    const TEXT = {
+      idle: ['Descarga inicial', `Se guardarán ${total} archivos en tu teléfono para verla sin conexión. Solo pasa una vez.`],
+      run: ['Descargando', 'No cierres la aplicación.'],
+      pause: ['En pausa', 'La descarga se reanuda donde quedó.'],
+      error: ['Descarga incompleta', 'Algunos archivos fallaron. Revisa tu conexión.'],
+      done: ['Listo', 'Ya puedes abrirla sin conexión.'],
+    };
 
-    $('dl-title').textContent = skipped ? 'Continuando' : 'Listo';
-    $('dl-sub').textContent = skipped ? 'Algunos archivos se cargarán al abrir.' : 'Ya puedes abrirla sin conexión.';
-    buzz([20, 70, 20]);
-    await sleep(1800);
+    const acts = $('dl-actions');
+    const render = () => {
+      $('dl-title').textContent = TEXT[state][0];
+      $('dl-sub').textContent = TEXT[state][1];
+      acts.replaceChildren();
+      (BTN[state] || []).forEach(([label, fn]) => {
+        const b = el('button', 'opt show settled', acts);
+        b.type = 'button';
+        b.textContent = label;
+        b.addEventListener('click', () => { buzz(25); fn(); });
+      });
+      paint();
+    };
+
+    async function go() {
+      cancelled = false;
+      state = 'run';
+      samples.length = 0;
+      render();
+      const failed = await runBatch(pending);
+      if (cancelled) return;
+      if (failed.length) { pending = failed; state = 'error'; render(); return; }
+      state = 'done';
+      render();
+      finish('ok');
+    }
+    const pauseIt = () => { paused = true; state = 'pause'; render(); };
+    const resumeIt = () => { paused = false; samples.length = 0; state = 'run'; render(); wake(); };
+    const cancel = () => { cancelled = true; paused = false; ac.abort(); wake(); finish('cancel'); };
+    const BTN = {
+      idle: [['Descargar', go], ['Cancelar', cancel]],
+      run: [['Pausar', pauseIt], ['Cancelar', cancel]],
+      pause: [['Continuar', resumeIt], ['Cancelar', cancel]],
+      error: [['Descargar', go], ['Cancelar', cancel]],
+      done: [],
+    };
+
+    render();
+    const outcome = await finished;
+    clearInterval(tick);
+    if (outcome === 'ok') { buzz([20, 70, 20]); await sleep(1800); }
     await fadeOut(s);
   }
 

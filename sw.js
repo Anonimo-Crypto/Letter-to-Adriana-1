@@ -2,7 +2,7 @@
 // - Shell (HTML/CSS/JS/iconos): precache + stale-while-revalidate.
 // - Fotos de /carrusel/: cache primero (las descarga la pantalla inicial), sin volver a pedirlas.
 // Sube la versión de CACHE para forzar la limpieza del shell.
-const CACHE = 'carta-v10';
+const CACHE = 'carta-v11';
 const MEDIA = 'carta-media';
 const SHELL = [
   './',
